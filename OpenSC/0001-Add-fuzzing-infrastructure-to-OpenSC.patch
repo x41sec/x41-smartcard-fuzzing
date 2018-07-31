@@ -1,0 +1,430 @@
+From 18a6ef2d67bedd61b9030e4e4ece37bfbe3762cd Mon Sep 17 00:00:00 2001
+From: Eric Sesterhenn <eric.sesterhenn@x41-dsec.de>
+Date: Mon, 5 Feb 2018 12:33:17 +0100
+Subject: [PATCH] Add fuzzing infrastructure to OpenSC
+
+---
+ configure.ac                 |  15 ++-
+ src/libopensc/Makefile.am    |   2 +-
+ src/libopensc/Makefile.mak   |   2 +-
+ src/libopensc/ctx.c          |   2 +
+ src/libopensc/internal.h     |   5 +
+ src/libopensc/reader-fuzzy.c | 292 +++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 314 insertions(+), 4 deletions(-)
+ create mode 100644 src/libopensc/reader-fuzzy.c
+
+diff --git a/configure.ac b/configure.ac
+index 9b319f28..cda78d99 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -193,6 +193,12 @@ AC_ARG_ENABLE(
+ )
+ 
+ AC_ARG_ENABLE(
++	[fuzzy],
++	[AS_HELP_STRING([--enable-fuzzy],[enable fuzzing reader @<:@disabled@:>@])],
++	,
++	[enable_fuzzy="no"]
++)
++AC_ARG_ENABLE(
+ 	[pcsc],
+ 	[AS_HELP_STRING([--disable-pcsc],[disable pcsc support @<:@enabled@:>@])],
+ 	,
+@@ -278,11 +284,11 @@ AC_ARG_WITH(
+ 
+ dnl ./configure check
+ reader_count=""
+-for rdriver in "${enable_pcsc}" "${enable_cryptotokenkit}" "${enable_openct}" "${enable_ctapi}"; do
++for rdriver in "${enable_pcsc}" "${enable_cryptotokenkit}" "${enable_openct}" "${enable_ctapi}" "${enable_fuzzy}"; do
+ 	test "${rdriver}" = "yes" && reader_count="${reader_count}x"
+ done
+ if test "${reader_count}" != "x"; then
+-	AC_MSG_ERROR([Only one of --enable-pcsc, --enable-cryptotokenkit, --enable-openct, --enable-ctapi can be specified!])
++	AC_MSG_ERROR([Only one of --enable-pcsc, --enable-cryptotokenkit, --enable-openct, --enable-ctapi, --enable-fuzzy can be specified!])
+ fi
+ 
+ dnl Checks for programs.
+@@ -739,6 +745,10 @@ if test "${enable_openct}" = "yes"; then
+ 	)
+ fi
+ 
++if test "${enable_fuzzy}" = "yes"; then
++	AC_DEFINE([ENABLE_FUZZY], [1], [Enable fuzzing reader support])
++fi
++
+ if test "${enable_ctapi}" = "yes"; then
+ 	AC_DEFINE([ENABLE_CTAPI], [1], [Enable CT-API support])
+ fi
+@@ -986,6 +996,7 @@ AM_CONDITIONAL([ENABLE_OPENSSL], [test "${enable_openssl}" = "yes"])
+ AM_CONDITIONAL([ENABLE_OPENPACE], [test "${enable_openpace}" = "yes"])
+ AM_CONDITIONAL([ENABLE_CRYPTOTOKENKIT], [test "${enable_cryptotokenkit}" = "yes"])
+ AM_CONDITIONAL([ENABLE_OPENCT], [test "${enable_openct}" = "yes"])
++AM_CONDITIONAL([ENABLE_FUZZY], [test "${enable_fuzzy}" = "yes"])
+ AM_CONDITIONAL([ENABLE_DOC], [test "${enable_doc}" = "yes"])
+ AM_CONDITIONAL([WIN32], [test "${WIN32}" = "yes"])
+ AM_CONDITIONAL([CYGWIN], [test "${CYGWIN}" = "yes"])
+diff --git a/src/libopensc/Makefile.am b/src/libopensc/Makefile.am
+index a71256b0..7f809d27 100644
+--- a/src/libopensc/Makefile.am
++++ b/src/libopensc/Makefile.am
+@@ -31,7 +31,7 @@ libopensc_la_SOURCES_BASE = \
+ 	\
+ 	muscle.c muscle-filesystem.c \
+ 	\
+-	ctbcs.c reader-ctapi.c reader-pcsc.c reader-openct.c reader-tr03119.c \
++	ctbcs.c reader-ctapi.c reader-pcsc.c reader-fuzzy.c reader-openct.c reader-tr03119.c \
+ 	\
+ 	card-setcos.c card-miocos.c card-flex.c card-gpk.c \
+ 	card-cardos.c card-tcos.c card-default.c \
+diff --git a/src/libopensc/Makefile.mak b/src/libopensc/Makefile.mak
+index 26760ae2..0d67ea18 100644
+--- a/src/libopensc/Makefile.mak
++++ b/src/libopensc/Makefile.mak
+@@ -12,7 +12,7 @@ OBJECTS			= \
+ 	\
+ 	muscle.obj muscle-filesystem.obj \
+ 	\
+-	ctbcs.obj reader-ctapi.obj reader-pcsc.obj reader-openct.obj reader-tr03119.obj \
++	ctbcs.obj reader-ctapi.obj reader-pcsc.obj reader-fuzzy.obj reader-openct.obj reader-tr03119.obj \
+ 	\
+ 	card-setcos.obj card-miocos.obj card-flex.obj card-gpk.obj \
+ 	card-cardos.obj card-tcos.obj card-default.obj \
+diff --git a/src/libopensc/ctx.c b/src/libopensc/ctx.c
+index 629480c1..e967ee69 100644
+--- a/src/libopensc/ctx.c
++++ b/src/libopensc/ctx.c
+@@ -828,6 +828,8 @@ int sc_context_create(sc_context_t **ctx_out, const sc_context_param_t *parm)
+ 	ctx->reader_driver = sc_get_ctapi_driver();
+ #elif defined(ENABLE_OPENCT)
+ 	ctx->reader_driver = sc_get_openct_driver();
++#elif defined(ENABLE_FUZZY)
++	ctx->reader_driver = sc_get_fuzzy_driver();
+ #endif
+ 
+ 	r = ctx->reader_driver->ops->init(ctx);
+diff --git a/src/libopensc/internal.h b/src/libopensc/internal.h
+index 33f64cfe..b4baceff 100644
+--- a/src/libopensc/internal.h
++++ b/src/libopensc/internal.h
+@@ -47,8 +47,12 @@ extern "C" {
+ #define SC_FILE_MAGIC			0x14426950
+ 
+ #ifndef _WIN32
++#ifndef ENABLE_FUZZY
+ #define msleep(t)	usleep((t) * 1000)
+ #else
++#define msleep(t)
++#endif
++#else
+ #define msleep(t)	Sleep(t)
+ #define sleep(t)	Sleep((t) * 1000)
+ #endif
+@@ -257,6 +261,7 @@ int sc_apdu_set_resp(sc_context_t *ctx, sc_apdu_t *apdu, const u8 *buf,
+ 
+ extern struct sc_reader_driver *sc_get_pcsc_driver(void);
+ extern struct sc_reader_driver *sc_get_ctapi_driver(void);
++extern struct sc_reader_driver *sc_get_fuzzy_driver(void);
+ extern struct sc_reader_driver *sc_get_openct_driver(void);
+ extern struct sc_reader_driver *sc_get_cryptotokenkit_driver(void);
+ 
+diff --git a/src/libopensc/reader-fuzzy.c b/src/libopensc/reader-fuzzy.c
+new file mode 100644
+index 00000000..237f41b1
+--- /dev/null
++++ b/src/libopensc/reader-fuzzy.c
+@@ -0,0 +1,292 @@
++/*
++ * reader-fuzzy.c: backend for OpenCT
++ *
++ * Copyright (C) 2003  Olaf Kirch <okir@suse.de>
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
++ */
++
++/*
++ * Use OPENSC_FUZZ_FILE to configure the input file, OPENSC_FUZZ_RECORD
++ * for pre-recorded APDU responses and OPENSC_FUZZ_ATR for the atr
++ */
++
++#if HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#ifdef ENABLE_FUZZY
++
++#include <errno.h>
++#include <stdlib.h>
++#include <string.h>
++#include <syslog.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <sys/un.h>
++#ifdef HAVE_UNISTD_H
++#include <unistd.h>
++#endif
++
++#include "internal.h"
++
++/* function declarations */
++static int fuzzy_reader_init(sc_context_t *ctx);
++static int fuzzy_reader_finish(sc_context_t *ctx);
++static int fuzzy_reader_release(sc_reader_t *reader);
++static int fuzzy_reader_detect_card_presence(sc_reader_t *reader);
++static int fuzzy_reader_connect(sc_reader_t *reader);
++static int fuzzy_reader_disconnect(sc_reader_t *reader);
++static int fuzzy_reader_transmit(sc_reader_t *reader, sc_apdu_t *apdu);
++static int fuzzy_reader_perform_verify(sc_reader_t *reader, struct sc_pin_cmd_data *info);
++static int fuzzy_reader_lock(sc_reader_t *reader);
++static int fuzzy_reader_unlock(sc_reader_t *reader);
++
++static struct sc_reader_operations fuzzy_ops;
++
++#define FUZZBUFSIZE 16384
++static char fuzzbuffer[FUZZBUFSIZE];
++static size_t fuzzlen;
++static size_t fuzzoffset;
++static FILE *fuzzrecord;
++
++static struct sc_reader_driver fuzzy_reader_driver = {
++	"OpenCT reader",
++	"fuzzy",
++	&fuzzy_ops,
++	NULL
++};
++
++static int
++fuzzy_reader_init(sc_context_t *ctx)
++{
++	char *filename;
++	FILE *f;
++	sc_reader_t *reader;
++	/* 
++	 * we use environment variables for configuration, at the
++	 * moment, this looks like the lesser mess than a configure
++	 * file for each fuzzing instance
++	*/
++	LOG_FUNC_CALLED(ctx);
++
++
++	/* setup input from afl or other fuzzer */
++	filename = getenv("OPENSC_FUZZ_FILE");
++	if (!filename)
++		filename = "input.apdu";
++
++	f = fopen(filename, "rb");
++	if (!f)
++		return SC_ERROR_INTERNAL;
++
++	fuzzlen = fread(fuzzbuffer, 1, sizeof(fuzzbuffer), f);
++	fclose(f);
++	fuzzoffset = 0;
++
++
++	/* in case we want to fuzz deeper layers, we might want to
++	 * use pre-recorded answers to the first few APDU sent */
++	fuzzrecord = NULL;
++	filename = getenv("OPENSC_FUZZ_RECORD");
++	if (filename) {
++		fuzzrecord = fopen(filename, "r");
++	}
++
++	/* allocate a reader */
++	reader = calloc(1, sizeof(*reader));
++	if (!reader)
++		return SC_ERROR_OUT_OF_MEMORY;
++
++	reader->driver = &fuzzy_reader_driver;
++	reader->ops = &fuzzy_ops;
++	reader->drv_data = NULL;
++	reader->name = strdup("libfuzzy");
++	_sc_add_reader(ctx, reader);
++
++	return SC_SUCCESS;
++}
++
++static int fuzzy_reader_finish(sc_context_t *ctx)
++{
++	LOG_FUNC_CALLED(ctx);
++	return SC_SUCCESS;
++}
++
++static int fuzzy_reader_release(sc_reader_t *reader)
++{
++	LOG_FUNC_CALLED(reader->ctx);
++	return SC_SUCCESS;
++}
++
++static int fuzzy_reader_detect_card_presence(sc_reader_t *reader)
++{
++	LOG_FUNC_CALLED(reader->ctx);
++	reader->flags = SC_READER_CARD_PRESENT;
++	return SC_READER_CARD_PRESENT;
++}
++
++static int
++fuzzy_reader_connect(sc_reader_t *reader)
++{
++	char *atr;
++	size_t len;
++	char buf[30];
++	size_t atrlen = sizeof(buf);
++	int rc;
++	LOG_FUNC_CALLED(reader->ctx);
++
++	/* fill ATR to decide what to fuzz */
++	atr = getenv("OPENSC_FUZZ_ATR");
++	if (!atr) {
++		atr = "\x3B\x9F\x95\x81\x31\xFE\x9F\x00\x66\x46\x53\x05\x10\x00\x11\x71\xdf\x00\x00\x00\x6a\x82\x5e";
++		atrlen = 23;
++	} else {
++		// TODO do some magic parsing... ;)
++		rc = sc_hex_to_bin(atr, (u8 *) buf, &atrlen);
++		if (rc != SC_SUCCESS)
++			return rc;
++		atr = buf;
++	}
++	len = MIN(atrlen, sizeof(reader->atr.value));
++	memcpy(reader->atr.value, atr, len);
++	reader->atr.len = len;
++
++	return SC_SUCCESS;
++}
++
++static int fuzzy_reader_disconnect(sc_reader_t *reader)
++{
++	LOG_FUNC_CALLED(reader->ctx);
++	return SC_SUCCESS;
++}
++
++static int fuzzy_reader_transmit(sc_reader_t *reader, sc_apdu_t *apdu)
++{
++	/* Here we do the actual fuzzing */
++	LOG_FUNC_CALLED(reader->ctx);
++
++	size_t       ssize, rsize, rbuflen = 0;
++	u8           *sbuf = NULL, *rbuf = NULL;
++	int          r, rc;
++	char         recordbuf[1024];
++	char         tmpbuf[513];
++	size_t       tmpbuflen = sizeof(tmpbuf);
++	int          answered = 0;
++
++	if (fuzzoffset >= fuzzlen) {
++		r = SC_ERROR_OUT_OF_MEMORY;
++		goto out;
++	}
++
++	rsize = rbuflen = apdu->resplen + 2;
++	rbuf     = malloc(rbuflen);
++	if (rbuf == NULL) {
++		r = SC_ERROR_OUT_OF_MEMORY;
++		goto out;
++	}
++	/* encode and log the APDU */
++	r = sc_apdu_get_octets(reader->ctx, apdu, &sbuf, &ssize, SC_PROTO_RAW);
++	if (r != SC_SUCCESS)
++		goto out;
++	sc_apdu_log(reader->ctx, SC_LOG_DEBUG_NORMAL, sbuf, ssize, 1);
++
++
++	/* in case we want to answer the first few APDU with pre-recorded
++	 * responses, we check for fuzzrecord and read the answers from 
++         * there. They are just hex encoded lines, with each line
++	 * representing one answer, e.g.:
++	 * 
++	 * 	00009000
++         */
++	if (fuzzrecord && fgets(recordbuf, sizeof(recordbuf), fuzzrecord)) {
++		rc = sc_hex_to_bin(recordbuf, (u8 *) tmpbuf, &tmpbuflen);
++		if (rc == SC_SUCCESS) {
++			if (tmpbuflen <= rsize) {
++				memcpy(rbuf, tmpbuf, tmpbuflen);
++				rsize = tmpbuflen;
++				answered = 1;
++			}
++		}
++        }
++
++
++	/* if no prerecorded response was found, get it from the fuzzed file */
++        if (!answered) {
++		if (fuzzoffset + rsize > fuzzlen)
++			rsize = fuzzlen - fuzzoffset;
++
++		memcpy(rbuf, fuzzbuffer + fuzzoffset, rsize);
++		fuzzoffset += rsize;
++	}
++
++	/* log and set response */
++	sc_apdu_log(reader->ctx, SC_LOG_DEBUG_NORMAL, rbuf, rsize, 0);
++	r = sc_apdu_set_resp(reader->ctx, apdu, rbuf, rsize);
++out:
++	if (sbuf != NULL) {
++		sc_mem_clear(sbuf, ssize);
++		free(sbuf);
++	}
++	if (rbuf != NULL) {
++		sc_mem_clear(rbuf, rbuflen);
++		free(rbuf);
++	}
++
++	return r;
++}
++
++static int fuzzy_reader_perform_verify(sc_reader_t *reader, struct sc_pin_cmd_data *info)
++{
++	LOG_FUNC_CALLED(reader->ctx);
++	info->apdu->sw1 = 90;
++	info->apdu->sw2 = 0;
++	return 0;
++}
++
++static int fuzzy_reader_lock(sc_reader_t *reader)
++{
++	LOG_FUNC_CALLED(reader->ctx);
++	return 0;
++}
++
++static int fuzzy_reader_unlock(sc_reader_t *reader)
++{
++	LOG_FUNC_CALLED(reader->ctx);
++	return 0;
++}
++
++
++
++struct sc_reader_driver *sc_get_fuzzy_driver(void)
++{
++	fuzzy_ops.init = fuzzy_reader_init;
++	fuzzy_ops.finish = fuzzy_reader_finish;
++	fuzzy_ops.detect_readers = NULL;
++	fuzzy_ops.release = fuzzy_reader_release;
++	fuzzy_ops.detect_card_presence = fuzzy_reader_detect_card_presence;
++	fuzzy_ops.connect = fuzzy_reader_connect;
++	fuzzy_ops.disconnect = fuzzy_reader_disconnect;
++	fuzzy_ops.transmit = fuzzy_reader_transmit;
++	fuzzy_ops.perform_verify = fuzzy_reader_perform_verify;
++	fuzzy_ops.perform_pace = NULL;
++	fuzzy_ops.lock = fuzzy_reader_lock;
++	fuzzy_ops.unlock = fuzzy_reader_unlock;
++	fuzzy_ops.use_reader = NULL;
++
++	return &fuzzy_reader_driver;
++}
++#endif
+-- 
+2.11.0
+
