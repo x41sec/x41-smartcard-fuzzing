@@ -4,7 +4,10 @@ Smartcard Driver Fuzzing Tools
 This is a collection of several tools that help in fuzzing smartcard
 drivers for *nix and windows. As usual for such stuff, it is quite
 hackish in some parts and more tested in others :-)
-If you have questions or need help, email eric.sesterhenn@x41-dsec.de.
+If you have questions or need help, email eric.sesterhenn@x41-dsec.de or
+read our blogpost at:
+
+https://www.x41-dsec.de/lab/blog/smartcards/
 
 What is in here?
 ----------------
