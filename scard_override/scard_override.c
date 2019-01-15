@@ -105,6 +105,33 @@ out:
 	*outlen = count;
 	return err;
 }
+// From opensc reader.c
+#define SCARD_CLASS_SYSTEM     0x7fff
+#define SCARD_ATTR_VALUE(Class, Tag) ((((ULONG)(Class)) << 16) | ((ULONG)(Tag)))
+
+#ifndef SCARD_ATTR_DEVICE_FRIENDLY_NAME_A
+#define SCARD_ATTR_DEVICE_FRIENDLY_NAME_A SCARD_ATTR_VALUE(SCARD_CLASS_SYSTEM, 0x0003)
+#endif
+
+#ifndef SCARD_ATTR_DEVICE_SYSTEM_NAME_A
+#define SCARD_ATTR_DEVICE_SYSTEM_NAME_A SCARD_ATTR_VALUE(SCARD_CLASS_SYSTEM, 0x0004)
+#endif
+
+#define SCARD_CLASS_VENDOR_INFO 1
+
+#ifndef SCARD_ATTR_VENDOR_NAME
+#define SCARD_ATTR_VENDOR_NAME SCARD_ATTR_VALUE(SCARD_CLASS_VENDOR_INFO, 0x0100) /**< Vendor name. */
+#endif
+
+#ifndef SCARD_ATTR_VENDOR_IFD_TYPE
+#define SCARD_ATTR_VENDOR_IFD_TYPE SCARD_ATTR_VALUE(SCARD_CLASS_VENDOR_INFO, 0x0101) /**< Vendor-supplied interface device type (model designation of reader). */
+#endif
+
+#ifndef SCARD_ATTR_VENDOR_IFD_VERSION
+#define SCARD_ATTR_VENDOR_IFD_VERSION SCARD_ATTR_VALUE(SCARD_CLASS_VENDOR_INFO, 0x0102) /**< Vendor-supplied interface device version (DWORD in the form 0xMMmmbbbb where MM = major version, mm = minor version, and bbbb = build number). */
+#endif
+
+
 
 LONG init() {
 	char *filename;
@@ -439,9 +466,23 @@ LONG SCardGetAttrib(SCARDHANDLE hCard, DWORD dwAttrId,
 	/*@out@*/ LPBYTE pbAttr, LPDWORD pcbAttrLen) {
 
 	LOGFUNC();
-	//TODO: implement
-	abort();
-	return SCARD_S_SUCCESS;
+	printf("requesting attribute %x", dwAttrId);
+	switch(dwAttrId) {
+		case SCARD_ATTR_DEVICE_SYSTEM_NAME_A:
+		case SCARD_ATTR_VENDOR_NAME:
+			if (pbAttr && *pcbAttrLen > strlen(READER) + 1) {
+				memset(pbAttr, 0, *pcbAttrLen);
+				strcpy(pbAttr, READER);
+				*pcbAttrLen = strlen(READER);
+			}
+			return SCARD_S_SUCCESS;
+		case SCARD_ATTR_VENDOR_IFD_VERSION:
+			memcpy(pbAttr, "0123", 4);
+			return SCARD_S_SUCCESS;	
+			break;
+	}	
+
+	return SCARD_E_NO_MEMORY;
 }
 
 LONG SCardSetAttrib(SCARDHANDLE hCard, DWORD dwAttrId,
